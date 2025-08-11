@@ -801,6 +801,8 @@ class ReportDialog(CustomDialog):
         summary_label = QLabel(summary)
         summary_label.setObjectName("SummaryLabel")
         summary_label.setWordWrap(True)
+        summary_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        summary_label.setOpenExternalLinks(True)
         top_layout.addWidget(summary_label, 1)
         main_layout.addLayout(top_layout)
 
