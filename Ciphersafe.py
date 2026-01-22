@@ -10,61 +10,15 @@
 #   ╚═════╝ ╚═╝╚═╝          ╚═╝    ╚═╝╚══════╝╚═╝    ╚═╝   ╚══════╝╚═╝    ╚═╝╚═╝          ╚══════╝
 # =============================================================================
 #
-#   CipherSafe v1.0 - 初始版本
+#   CipherSafe v1.1 
 #
 #   作者 (Author):          Hayami-64 & AI
-#   版本 (Version):        1.0 (Build 20250809)
-#   發佈日期 (Release Date): 2025-08-09
+#   版本 (Version):        1.1 (Build 20250810)
+#   發佈日期 (Release Date): 2025-08-10
 #   授權條款 (License):      MIT License
-#   GitHub:              [https://github.com/Hayami-64/CipherSafe]
-#
-# -----------------------------------------------------------------------------
-#
-#   描述 (Description):
-#
-#   CipherSafe 是一款基於 Python 和 PyQt6 的現代檔案/文字加密工具，
-#   旨在提供強大且易用的加密功能，保護您的數位資產安全。
-#
-# -----------------------------------------------------------------------------
-#
-#   主要功能 (Main Features):
-#
-#   - **[核心演算法]** 使用 AES-256-GCM 認證加密模式，確保資料的機密性與完整性。
-#   - **[金鑰派生]** 使用 Argon2id 演算法從密碼產生金鑰，提供多級可調安全參數，有效抵抗暴力破解。
-#   - **[雙重模式]** 支援「金鑰檔案」和「純密碼」兩種加密模式，兼顧最高安全性與便捷性。
-#   - **[隱私保護]** 對原始檔名進行加密，防止元資料洩露。
-#   - **[使用者體驗]** 提供現代化的圖形使用者介面，支援檔案和資料夾的拖曳操作。
-#   - **[輔助工具]** 內建獨立的文字加解密工具和批次重新命名工具。
 #
 # =============================================================================
-#
-#   重要聲明與免責條款 (Disclaimer and Limitation of Liability)
-#
-#   1.  **按「原樣」提供**: 本軟體按「原樣」提供，不附帶任何形式的明示或
-#       暗示的保證，包括但不限於對適銷性、特定用途適用性和非侵權性的
-#       保證。
-#
-#   2.  **風險自負**: 您理解並同意，您使用本軟體的風險完全由您自己承擔。
-#       作者不對因使用或無法使用本軟體而導致的任何直接、間接、偶然、
-#       特殊、懲戒性或後果性損害負責，包括但不限於資料遺失、利潤損失、
-#       業務中斷或個人資訊洩露。
-#
-#   3.  **無資料復原責任**: 作者沒有義務也無法幫助您復原因忘記密碼、
-#       遺失金鑰檔案或因軟體錯誤/崩潰而無法存取的資料。**備份您的金鑰、
-#       密碼和原始資料是您自己的責任。**
-#
-#   4.  **合法性與合規性**: 您有責任確保您對本軟體的使用符合您所在國家
-#       或地區的法律法規，特別是關於加密軟體使用和資料隱私的規定。
-#       作者不對您使用本軟體進行的任何非法活動（如加密勒索、侵犯版權等）
-#       承擔任何責任。
-#
-#   5.  **無技術支援保證**: 作者沒有義務提供任何形式的技術支援、維護或
-#       更新。
-#
-#   透過下載、安裝或使用本軟體，即表示您已閱讀、理解並同意受上述所有
-#   條款的約束。如果您不同意這些條款，請不要使用本軟體。
-#
-# =============================================================================
+
 import sys
 import os
 import warnings
@@ -76,6 +30,8 @@ import base64
 import logging
 import traceback
 import re
+import multiprocessing
+from multiprocessing import Queue
 from io import BytesIO
 from typing import Tuple, List, Optional, Dict, Any
 
@@ -86,12 +42,11 @@ try:
                                  QLineEdit, QDialogButtonBox, QMenu, QTextEdit,
                                  QStackedWidget, QComboBox, QRadioButton, QScrollArea,
                                  QSizePolicy)
-    from PyQt6.QtCore import Qt, QThread, QObject, pyqtSignal, QSize
+    from PyQt6.QtCore import Qt, QThread, QObject, pyqtSignal, QSize, QTimer
     from PyQt6.QtGui import QIcon, QPixmap, QPainter, QAction
 
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.exceptions import InvalidTag
-    # FIX: 引入HKDF和SHA256用於從高熵主金鑰派生DEK
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
     from cryptography.hazmat.primitives import hashes
 
@@ -132,8 +87,9 @@ def setup_logging():
         from logging.handlers import RotatingFileHandler
         handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=3, encoding='utf-8')
         
+        # 增加 processName 以區分主進程與加密進程
         formatter = logging.Formatter(
-            '%(asctime)s - %(levelname)s - [%(threadName)s:%(funcName)s:%(lineno)d] - %(message)s'
+            '%(asctime)s - %(levelname)s - [%(processName)s:%(threadName)s] - %(message)s'
         )
         handler.setFormatter(formatter)
 
@@ -185,6 +141,9 @@ class CryptoLogic:
     _FNK_LEN = 32
     _WRAPPED_FNK_LEN = _FNK_LEN + 16
     _ARGON2_TYPE = Argon2Type.ID
+    _CHUNK_SIZE = 1024 * 1024
+    _TAG_LEN = 16
+
     # HARDENING: 增強了所有安全等級的Argon2參數
     SECURITY_LEVELS = {
         0: (2, 64 * 1024, 4),    # Low
@@ -422,6 +381,206 @@ class CryptoLogic:
             raise InvalidTag(f"解密失敗：金鑰/密碼錯誤或文字已毀損。({e})")
         except Exception as e:
             raise RuntimeError(f"文字解密時發生未知錯誤: {e}")
+    
+    @staticmethod
+    def _sanitize_filename(filename: str) -> str:
+        """清理檔名，移除非法字元和潛在的危險序列"""
+        if not filename:
+            return ""
+        sanitized = re.sub(r'[/\\]', '', filename)
+        sanitized = re.sub(r'[<>:"|?*]', '_', sanitized)
+        sanitized = "".join(c for c in sanitized if ord(c) > 31)
+        if sys.platform == "win32":
+            RESERVED_NAMES = ('CON', 'PRN', 'AUX', 'NUL', 
+                              'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+                              'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9')
+            name_part, _, _ = sanitized.partition('.')
+            if name_part.upper() in RESERVED_NAMES:
+                sanitized = f"_{sanitized}_"
+        if sanitized in ('.', '..'):
+            sanitized = f"_{sanitized}_"
+        return sanitized.strip()[:255]
+    
+    # -------------------------------------------------------------------------
+    #  STATIC ENCRYPTION METHODS FOR MULTIPROCESSING
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def encrypt_file_static(input_path, output_path, master_key, encryption_mode, level=1, salt=None):
+        meta_buffer = BytesIO()
+        original_filename_bytes = os.path.basename(input_path).encode(CryptoLogic._FILENAME_ENCODING, CryptoLogic._FILENAME_ERROR_HANDLER)
+        
+        fnk_wrap_nonce, wrapped_fnk, fn_nonce, encrypted_filename = CryptoLogic._encrypt_filename(original_filename_bytes, master_key)
+        
+        dek_salt = os.urandom(CryptoLogic._SALT_LEN)
+        initial_data_nonce = os.urandom(CryptoLogic._NONCE_LEN)
+        
+        hkdf = HKDF(algorithm=hashes.SHA256(), length=CryptoLogic._KEY_LEN, salt=dek_salt, info=b'csafe-data-encryption-key')
+        dek_bytes = hkdf.derive(master_key)
+        dek = bytearray(dek_bytes)
+        aead = AESGCM(dek)
+
+        meta_buffer.write(CryptoLogic._write_meta_block(CryptoLogic.MetaTags.TAG_ENCRYPTION_MODE, encryption_mode))
+        if encryption_mode == CryptoLogic._MODE_DIRECT_PASS:
+            meta_buffer.write(CryptoLogic._write_meta_block(CryptoLogic.MetaTags.TAG_KDF_PARAMS, level.to_bytes(1, 'big')))
+            meta_buffer.write(CryptoLogic._write_meta_block(CryptoLogic.MetaTags.TAG_KDF_SALT_PRIMARY, salt))
+        
+        meta_buffer.write(CryptoLogic._write_meta_block(CryptoLogic.MetaTags.TAG_FNK_WRAP_NONCE, fnk_wrap_nonce))
+        meta_buffer.write(CryptoLogic._write_meta_block(CryptoLogic.MetaTags.TAG_FILENAME_NONCE, fn_nonce))
+        meta_buffer.write(CryptoLogic._write_meta_block(CryptoLogic.MetaTags.TAG_ENCRYPTED_FILENAME, encrypted_filename))
+        meta_buffer.write(CryptoLogic._write_meta_block(CryptoLogic.MetaTags.TAG_DATA_DEK_SALT, dek_salt))
+        meta_buffer.write(CryptoLogic._write_meta_block(CryptoLogic.MetaTags.TAG_DATA_NONCE, initial_data_nonce))
+
+        with open(input_path, 'rb') as f_in, open(output_path, 'wb') as f_out:
+            f_out.write(CryptoLogic._MAGIC_SIGNATURE)
+            f_out.write(CryptoLogic._FILE_TYPE_DATA)
+            meta_bytes = meta_buffer.getvalue()
+            f_out.write(len(meta_bytes).to_bytes(2, 'big'))
+            f_out.write(b'\x00\x00\x00\x00')
+            f_out.write(meta_bytes)
+            f_out.write(wrapped_fnk)
+            
+            chunk_counter = 0
+            while True:
+                chunk = f_in.read(CryptoLogic._CHUNK_SIZE)
+                if not chunk: break
+                
+                current_nonce = initial_data_nonce[:4] + chunk_counter.to_bytes(8, 'big')
+                f_out.write(aead.encrypt(current_nonce, chunk, None))
+                chunk_counter += 1
+                
+        dek[:] = b'\x00' * len(dek)
+
+    @staticmethod
+    def decrypt_file_static(input_path, output_path, master_key):
+        with open(input_path, 'rb') as f_in, open(output_path, 'wb') as f_out:
+            f_in.seek(8 + 1) # Skip magic + type
+            meta_len = int.from_bytes(f_in.read(2), 'big')
+            f_in.seek(CryptoLogic._HEADER_LEN)
+            meta = CryptoLogic._parse_metadata(f_in.read(meta_len))
+            
+            dek_salt = meta[CryptoLogic.MetaTags.TAG_DATA_DEK_SALT]
+            initial_data_nonce = meta[CryptoLogic.MetaTags.TAG_DATA_NONCE]
+            
+            hkdf = HKDF(algorithm=hashes.SHA256(), length=CryptoLogic._KEY_LEN, salt=dek_salt, info=b'csafe-data-encryption-key')
+            dek_bytes = hkdf.derive(master_key)
+            dek = bytearray(dek_bytes)
+            aead = AESGCM(dek)
+            
+            f_in.seek(CryptoLogic._HEADER_LEN + meta_len + CryptoLogic._WRAPPED_FNK_LEN)
+            
+            encrypted_chunk_size = CryptoLogic._CHUNK_SIZE + CryptoLogic._TAG_LEN
+            
+            chunk_counter = 0
+            while True:
+                encrypted_chunk = f_in.read(encrypted_chunk_size)
+                if not encrypted_chunk: break
+                
+                current_nonce = initial_data_nonce[:4] + chunk_counter.to_bytes(8, 'big')
+                f_out.write(aead.decrypt(current_nonce, encrypted_chunk, None))
+                chunk_counter += 1
+                
+            dek[:] = b'\x00' * len(dek)
+
+
+# -----------------------------------------------------------------------------
+#  獨立進程加密函數 (取代原本的 Worker Class)
+#  這個函數會在獨立的記憶體空間執行，結束後由 OS 強制回收記憶體
+# -----------------------------------------------------------------------------
+def crypto_worker_process(mode, file_list, output_dir, master_key_bytes, source_base_path, queue, kwargs):
+    """
+    這個函數會在一個全新的進程中運行。
+    當它結束時，所有內部的變數（包括金鑰副本）都會被 OS 強制銷毀。
+    """
+    total_files = len(file_list)
+    successful_paths = []
+    errors = []
+    skipped_paths = []
+    
+    # 將 bytes 轉回 bytearray (在新進程中這只是副本)
+    master_key = bytearray(master_key_bytes)
+    
+    try:
+        # 重建加密參數
+        encryption_mode = kwargs.get('encryption_mode')
+        level = kwargs.get('level', 1)
+        salt = kwargs.get('salt', None)
+        ext = '.0721'
+        
+        for i, input_path in enumerate(file_list):
+            current_filename = os.path.basename(input_path)
+            
+            # 發送進度
+            queue.put(('progress', i + 1, total_files, current_filename))
+            
+            output_path = None
+            try:
+                if not os.path.exists(input_path):
+                    raise FileNotFoundError(f"檔案不存在")
+
+                # 簡單的檢查邏輯
+                is_csafe = CryptoLogic.is_valid_csafe_file(input_path)
+                if mode == 'encrypt' and is_csafe:
+                    skipped_paths.append(input_path)
+                    continue
+                if mode == 'decrypt' and not is_csafe:
+                    skipped_paths.append(input_path)
+                    continue
+
+                # 路徑計算
+                relative_path = os.path.relpath(os.path.dirname(input_path), source_base_path)
+                if relative_path == '.': relative_path = ''
+                final_output_dir = os.path.join(output_dir, relative_path)
+                os.makedirs(final_output_dir, exist_ok=True)
+
+                if mode == 'encrypt':
+                    output_filename = os.path.splitext(current_filename)[0] + ext
+                    output_path = os.path.join(final_output_dir, output_filename)
+                    
+                    # 呼叫 CryptoLogic 的靜態方法
+                    CryptoLogic.encrypt_file_static(input_path, output_path, master_key, encryption_mode, level, salt)
+                    
+                else: # decrypt
+                    untrusted_filename = CryptoLogic.get_original_filename(input_path, master_key)
+                    if not untrusted_filename: raise ValueError("無法讀取原始檔名 (可能金鑰/密碼錯誤或檔案毀損)")
+                    
+                    output_filename = CryptoLogic._sanitize_filename(os.path.basename(untrusted_filename))
+                    if not output_filename:
+                        raise ValueError(f"偵測到無效或惡意的原始檔名")
+
+                    output_path = os.path.join(final_output_dir, output_filename)
+                    
+                    if os.path.exists(output_path):
+                        base, f_ext = os.path.splitext(output_path)
+                        count = 1
+                        while os.path.exists(f"{base} ({count}){f_ext}"):
+                            count += 1
+                        output_path = f"{base} ({count}){f_ext}"
+
+                    # 呼叫 CryptoLogic 的靜態方法
+                    CryptoLogic.decrypt_file_static(input_path, output_path, master_key)
+
+                successful_paths.append(input_path)
+
+            except Exception as e:
+                errors.append(f"- {current_filename}: {str(e)}")
+                # 如果出錯且有殘留檔案，清理之
+                if output_path and os.path.exists(output_path):
+                    try: os.remove(output_path)
+                    except: pass
+
+        # 準備報告
+        report = f"操作完成！\n\n成功處理: {len(successful_paths)} / {total_files} 個檔案。"
+        if errors:
+            report += "\n\n錯誤:\n" + "\n".join(errors)
+            
+        queue.put(('finished', report, output_dir, successful_paths))
+        
+    except Exception as e:
+        queue.put(('error', str(e)))
+    finally:
+        # 擦除子進程的金鑰副本
+        master_key[:] = b'\x00' * len(master_key)
+
 
 # --- Dialogs and Workers ---
 class KDFWorker(QObject):
@@ -924,232 +1083,31 @@ class BatchRenameApp(CustomDialog):
     def dropEvent(self, event):
         self.file_drop_label.setStyleSheet(""); path = event.mimeData().urls()[0].toLocalFile(); self.update_input_path(path)
 
-class Worker(QObject):
-    finished = pyqtSignal(str, str, list); progress_update = pyqtSignal(int, int, str)
-    _CHUNK_SIZE = 1024 * 1024; _TAG_LEN = 16
-    def __init__(self, mode: str, file_list: List[str], output_dir: str, master_key: bytearray, source_base_path: str, **kwargs):
-        super().__init__()
-        self.mode, self.file_list, self.output_dir = mode, file_list, output_dir
-        self.master_key, self.source_base_path = master_key, source_base_path
-        self.ext, self._is_running = '.0721', True
-        self.encryption_mode = kwargs.get('encryption_mode')
-        self.level = kwargs.get('level', 1)
-        self.salt = kwargs.get('salt', None)
-        self.total_files_to_process = len(file_list)
-
-    def stop(self): self._is_running = False
-
-    @staticmethod
-    def _sanitize_filename(filename: str) -> str:
-        """清理檔名，移除非法字元和潛在的危險序列"""
-        if not filename:
-            return ""
-        sanitized = re.sub(r'[/\\]', '', filename)
-        sanitized = re.sub(r'[<>:"|?*]', '_', sanitized)
-        sanitized = "".join(c for c in sanitized if ord(c) > 31)
-        if sys.platform == "win32":
-            RESERVED_NAMES = ('CON', 'PRN', 'AUX', 'NUL', 
-                              'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
-                              'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9')
-            name_part, _, _ = sanitized.partition('.')
-            if name_part.upper() in RESERVED_NAMES:
-                sanitized = f"_{sanitized}_"
-        if sanitized in ('.', '..'):
-            sanitized = f"_{sanitized}_"
-        return sanitized.strip()[:255]
-
-    def run(self):
-        errors, successful_paths, skipped_paths = [], [], []
-        logging.info(f"Worker 執行緒開始執行。模式: {self.mode}, 檔案數: {self.total_files_to_process}")
-        try:
-            for i, input_path in enumerate(self.file_list):
-                if not self._is_running:
-                    logging.info("操作被使用者中斷。")
-                    errors.append("操作被使用者中斷。"); break
-                
-                current_filename = os.path.basename(input_path)
-                self.progress_update.emit(i + 1, self.total_files_to_process, current_filename)
-                logging.info(f"正在處理檔案 {i+1}/{self.total_files_to_process}: {current_filename}")
-                output_path = None
-                try:
-                    if not os.path.exists(input_path): raise FileNotFoundError(f"來源檔案不存在: {input_path}")
-
-                    is_csafe_file = CryptoLogic.is_valid_csafe_file(input_path)
-
-                    if self.mode == 'encrypt':
-                        if is_csafe_file:
-                            skipped_paths.append(input_path)
-                            errors.append(f"- {current_filename}: 已是加密檔案，已跳過。")
-                            logging.warning(f"檔案 '{current_filename}' 已是加密檔案，跳過處理。")
-                            continue
-                    else: # decrypt mode
-                        if not is_csafe_file:
-                            skipped_paths.append(input_path)
-                            errors.append(f"- {current_filename}: 不是有效的加密檔案，已跳過。")
-                            logging.warning(f"檔案 '{current_filename}' 不是有效的加密檔案，跳過處理。")
-                            continue
-
-                    relative_path = os.path.relpath(os.path.dirname(input_path), self.source_base_path)
-                    if relative_path == '.': relative_path = ''
-                    
-                    if self.mode == 'encrypt':
-                        output_filename = os.path.splitext(current_filename)[0] + self.ext
-                        final_output_dir = os.path.join(self.output_dir, relative_path)
-                        os.makedirs(final_output_dir, exist_ok=True)
-                        output_path = os.path.join(final_output_dir, output_filename)
-                        logging.info(f"加密檔案 '{input_path}' 到 '{output_path}'")
-                        self._encrypt_file(input_path, output_path)
-                    else: # decrypt
-                        untrusted_filename = CryptoLogic.get_original_filename(input_path, self.master_key)
-                        if not untrusted_filename: raise ValueError("無法讀取原始檔名 (可能金鑰/密碼錯誤或檔案毀損)")
-                        
-                        output_filename = self._sanitize_filename(os.path.basename(untrusted_filename))
-                        if not output_filename:
-                            raise ValueError(f"偵測到無效或惡意的原始檔名 (清理後為空): {untrusted_filename}")
-
-                        final_output_dir = os.path.join(self.output_dir, relative_path)
-                        os.makedirs(final_output_dir, exist_ok=True)
-                        output_path = os.path.join(final_output_dir, output_filename)
-                        
-                        if os.path.exists(output_path):
-                            base, ext = os.path.splitext(output_path)
-                            count = 1
-                            while os.path.exists(f"{base} ({count}){ext}"):
-                                count += 1
-                            output_path = f"{base} ({count}){ext}"
-                            rename_msg = f"- {current_filename}: 輸出檔案已存在，已自動重新命名為 {os.path.basename(output_path)}"
-                            logging.warning(rename_msg)
-                            errors.append(rename_msg)
-
-                        logging.info(f"解密檔案 '{input_path}' 到 '{output_path}'")
-                        self._decrypt_file(input_path, output_path)
-
-                    if not self._is_running: raise InterruptedError("操作在檔案處理後被中斷")
-                    successful_paths.append(input_path)
-                    logging.info(f"檔案 '{current_filename}' 處理成功。")
-
-                except (InvalidTag, ValueError) as e:
-                    logging.warning(f"檔案 '{current_filename}' 處理失敗: 金鑰/密碼錯誤或檔案毀損。錯誤: {e}")
-                    errors.append(f"- {current_filename}: 金鑰/密碼錯誤或檔案已毀損。")
-                except Exception as e:
-                    logging.error(f"處理檔案 '{current_filename}' 時發生未知系統錯誤。", exc_info=True)
-                    if not self._is_running and output_path and os.path.exists(output_path):
-                        try: os.remove(output_path); errors.append(f"- {current_filename}: 操作被中斷，殘留檔案已清理。")
-                        except OSError: errors.append(f"- {current_filename}: 操作被中斷，但清理殘留檔案失敗。")
-                    else:
-                        errors.append(f"- {current_filename}: 處理時發生未知系統錯誤。")
-        finally:
-            if self.master_key:
-                self.master_key[:] = b'\x00' * len(self.master_key)
-                logging.info("Worker 執行緒中的主金鑰已從記憶體中擦除。")
-        
-        logging.info("Worker 執行緒執行完畢。")
-        
-        attempted_files = self.total_files_to_process - len(skipped_paths)
-        report = f"操作完成！\n\n成功處理: {len(successful_paths)} / {attempted_files} 個目標檔案。"
-        if len(skipped_paths) > 0:
-            report += f" ({len(skipped_paths)} 個檔案因類型不符被跳過)"
-
-        if errors: report += "\n\n以下檔案處理失敗或出現警告:\n" + "\n".join(errors)
-        
-        output_dir_to_open = self.output_dir if successful_paths else ""
-        self.finished.emit(report, output_dir_to_open, successful_paths)
-
-    def _encrypt_file(self, input_path, output_path):
-        meta_buffer = BytesIO()
-        original_filename_bytes = os.path.basename(input_path).encode(CryptoLogic._FILENAME_ENCODING, CryptoLogic._FILENAME_ERROR_HANDLER)
-        
-        fnk_wrap_nonce, wrapped_fnk, fn_nonce, encrypted_filename = CryptoLogic._encrypt_filename(original_filename_bytes, self.master_key)
-        
-        dek_salt = os.urandom(CryptoLogic._SALT_LEN)
-        initial_data_nonce = os.urandom(CryptoLogic._NONCE_LEN)
-        
-        hkdf = HKDF(algorithm=hashes.SHA256(), length=CryptoLogic._KEY_LEN, salt=dek_salt, info=b'csafe-data-encryption-key')
-        dek_bytes = hkdf.derive(self.master_key)
-        dek = bytearray(dek_bytes)
-        aead = AESGCM(dek)
-
-        meta_buffer.write(CryptoLogic._write_meta_block(CryptoLogic.MetaTags.TAG_ENCRYPTION_MODE, self.encryption_mode))
-        if self.encryption_mode == CryptoLogic._MODE_DIRECT_PASS:
-            meta_buffer.write(CryptoLogic._write_meta_block(CryptoLogic.MetaTags.TAG_KDF_PARAMS, self.level.to_bytes(1, 'big')))
-            meta_buffer.write(CryptoLogic._write_meta_block(CryptoLogic.MetaTags.TAG_KDF_SALT_PRIMARY, self.salt))
-        
-        meta_buffer.write(CryptoLogic._write_meta_block(CryptoLogic.MetaTags.TAG_FNK_WRAP_NONCE, fnk_wrap_nonce))
-        meta_buffer.write(CryptoLogic._write_meta_block(CryptoLogic.MetaTags.TAG_FILENAME_NONCE, fn_nonce))
-        meta_buffer.write(CryptoLogic._write_meta_block(CryptoLogic.MetaTags.TAG_ENCRYPTED_FILENAME, encrypted_filename))
-        meta_buffer.write(CryptoLogic._write_meta_block(CryptoLogic.MetaTags.TAG_DATA_DEK_SALT, dek_salt))
-        meta_buffer.write(CryptoLogic._write_meta_block(CryptoLogic.MetaTags.TAG_DATA_NONCE, initial_data_nonce))
-
-        with open(input_path, 'rb') as f_in, open(output_path, 'wb') as f_out:
-            f_out.write(CryptoLogic._MAGIC_SIGNATURE)
-            f_out.write(CryptoLogic._FILE_TYPE_DATA)
-            meta_bytes = meta_buffer.getvalue()
-            f_out.write(len(meta_bytes).to_bytes(2, 'big'))
-            f_out.write(b'\x00\x00\x00\x00')
-            f_out.write(meta_bytes)
-            f_out.write(wrapped_fnk)
-            
-            chunk_counter = 0
-            while chunk := f_in.read(self._CHUNK_SIZE):
-                if not self._is_running: raise InterruptedError("操作在寫入時被中斷")
-                
-                current_nonce = initial_data_nonce[:4] + chunk_counter.to_bytes(8, 'big')
-                f_out.write(aead.encrypt(current_nonce, chunk, None))
-                chunk_counter += 1
-                
-        dek[:] = b'\x00' * len(dek)
-
-    def _decrypt_file(self, input_path, output_path):
-        with open(input_path, 'rb') as f_in, open(output_path, 'wb') as f_out:
-            f_in.seek(8 + 1) # Skip magic + type
-            meta_len = int.from_bytes(f_in.read(2), 'big')
-            f_in.seek(CryptoLogic._HEADER_LEN)
-            meta = CryptoLogic._parse_metadata(f_in.read(meta_len))
-            
-            dek_salt = meta[CryptoLogic.MetaTags.TAG_DATA_DEK_SALT]
-            initial_data_nonce = meta[CryptoLogic.MetaTags.TAG_DATA_NONCE]
-            
-            hkdf = HKDF(algorithm=hashes.SHA256(), length=CryptoLogic._KEY_LEN, salt=dek_salt, info=b'csafe-data-encryption-key')
-            dek_bytes = hkdf.derive(self.master_key)
-            dek = bytearray(dek_bytes)
-            aead = AESGCM(dek)
-            
-            f_in.seek(CryptoLogic._HEADER_LEN + meta_len + CryptoLogic._WRAPPED_FNK_LEN)
-            
-            encrypted_chunk_size = self._CHUNK_SIZE + self._TAG_LEN
-            
-            chunk_counter = 0
-            while True:
-                if not self._is_running: raise InterruptedError("操作在解密時被中斷")
-                encrypted_chunk = f_in.read(encrypted_chunk_size)
-                if not encrypted_chunk: break
-                
-                current_nonce = initial_data_nonce[:4] + chunk_counter.to_bytes(8, 'big')
-                f_out.write(aead.decrypt(current_nonce, encrypted_chunk, None))
-                chunk_counter += 1
-                
-            dek[:] = b'\x00' * len(dek)
-
 class CipherSafeApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setObjectName("CipherSafeApp")
         self.input_path = ""
         self.key_file_path = ""
-        self.thread = None
-        self.worker = None
         self.current_mode = 'keyfile'
         self.rename_tool_window = None
         self.text_crypto_window = None
         self._is_dragging = False
         self._managed_buttons = []
+        
+        # --- Multiprocessing Variables ---
+        self.process = None 
+        self.queue = None   
+        self.timer = None   
+        # ---------------------------------
+        
         self.load_background()
         self.setAcceptDrops(True)
         self.initUI()
         self.apply_styles()
 
     def initUI(self):
-        self.setWindowTitle('CipherSafe v1.0'); self.setMinimumSize(500, 680); self.setGeometry(300, 300, 500, 680)
+        self.setWindowTitle('CipherSafe v1.0 '); self.setMinimumSize(500, 680); self.setGeometry(300, 300, 500, 680)
         icon_path = resource_path('assets/main_icon.ico')
         if os.path.exists(icon_path): self.setWindowIcon(QIcon(icon_path))
         main_layout = QVBoxLayout(self); main_layout.setContentsMargins(25, 20, 25, 25); main_layout.setSpacing(15)
@@ -1198,7 +1156,7 @@ class CipherSafeApp(QWidget):
 
     def start_operation(self):
         logging.info("開始操作流程...")
-        if self.thread and self.thread.isRunning():
+        if self.process and self.process.is_alive():
             logging.warning("操作請求被拒絕，因為已有任務在執行。")
             QMessageBox.warning(self, "提示", "一個操作正在進行中，請稍候。"); return
         if not self.input_path:
@@ -1292,18 +1250,50 @@ class CipherSafeApp(QWidget):
             logging.error("未能獲取到主金鑰，操作中止。")
             QMessageBox.critical(self, "內部錯誤", "未能獲取到主金鑰，操作中止。"); return
         
-        logging.info("主金鑰已獲取，準備啟動 Worker 執行緒。")
+        logging.info("主金鑰已獲取，準備啟動 Worker 進程。")
         self.set_ui_enabled(False)
-        self.thread = QThread()
-        self.worker = Worker(mode, file_list, output_dir, master_key, source_base_path, **worker_kwargs)
-        self.worker.moveToThread(self.thread)
-        self.thread.started.connect(self.worker.run)
-        self.worker.finished.connect(self.on_operation_finished)
-        self.worker.finished.connect(self.thread.quit)
-        self.worker.finished.connect(self.worker.deleteLater)
-        self.thread.finished.connect(self.thread.deleteLater)
-        self.worker.progress_update.connect(self.update_progress)
-        self.thread.start()
+        self.queue = Queue()
+        
+        # 轉換為 bytes 以便跨進程傳遞 (子進程會複製一份)
+        master_key_safe = bytes(master_key)
+        
+        self.process = multiprocessing.Process(
+            target=crypto_worker_process,
+            args=(mode, file_list, output_dir, master_key_safe, source_base_path, self.queue, worker_kwargs)
+        )
+        self.process.start()
+        
+        # 啟動 Timer 監聽
+        self.timer = QTimer()
+        self.timer.setInterval(100) # 每 100 毫秒檢查一次
+        self.timer.timeout.connect(self.check_process_queue)
+        self.timer.start()
+
+        # 主進程立即擦除金鑰
+        master_key[:] = b'\x00' * len(master_key)
+        logging.info("主進程中的金鑰副本已擦除。")
+
+    def check_process_queue(self):
+        """定時檢查子進程回傳的訊息"""
+        while not self.queue.empty():
+            msg = self.queue.get()
+            type_ = msg[0]
+            
+            if type_ == 'progress':
+                _, current, total, filename = msg
+                self.update_progress(current, total, filename)
+            
+            elif type_ == 'finished':
+                _, report, out_dir, paths = msg
+                self.timer.stop()
+                self.process.join()
+                self.process = None
+                self.on_operation_finished(report, out_dir, paths)
+            
+            elif type_ == 'error':
+                self.timer.stop()
+                QMessageBox.critical(self, "錯誤", msg[1])
+                self.set_ui_enabled(True)
 
     def _reset_key_password(self, master_key: bytearray, new_password: str, level: int) -> bool:
         """
@@ -1333,13 +1323,13 @@ class CipherSafeApp(QWidget):
 
     def show_about_dialog(self):
         about_text = """
-        <h2>CipherSafe v1.0</h2>
-        <p><b>Security Patch</b> (Build 20250809)</p>
+        <h2>CipherSafe v1.1</h2>
+        <p><b>Multiprocessing Edition</b> (Build 20250810)</p>
         <p>一個專注、易用的密碼學工具，旨在提供強大的檔案和文字加密功能。</p>
         <p><b>作者:</b> Hayami-64 & AI</p>
         <p><b>GitHub:</b> <a href="https://github.com/Hayami-64/CipherSafe">https://github.com/Hayami-64/CipherSafe</a></p>
         <p><b>Bilibili:</b> <a href="https://space.bilibili.com/645321866">Hayami-64 (UID: 645321866)</a></p>
-        <p><b>技術棧:</b> Python, PyQt6, Cryptography, Argon2</p>
+        <p><b>技術棧:</b> Python, PyQt6, Cryptography, Argon2, Multiprocessing</p>
         <hr>
         <h3>重要聲明與免責條款</h3>
         <p style="font-size: 9pt; color: #AAAAAA;">
@@ -1466,8 +1456,7 @@ class CipherSafeApp(QWidget):
         dialog = ReportDialog("操作報告", summary, details, output_dir, self)
         dialog.exec()
 
-        self.thread = None
-        self.worker = None
+        self.process = None # Reset process handle
 
     def load_background(self):
         self.background_pixmap = None
@@ -1587,7 +1576,8 @@ class CipherSafeApp(QWidget):
         if self.background_pixmap:
             painter = QPainter(self)
             scaled_pixmap = self.background_pixmap.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
-            x = (self.width() - scaled_pixmap.width()) / 2; y = (self.height() - scaled_pixmap.height()) / 2
+            x = (self.width() - scaled_pixmap.width()) / 2
+            y = (self.height() - scaled_pixmap.height()) / 2
             painter.drawPixmap(int(x), int(y), scaled_pixmap)
         super().paintEvent(event)
 
@@ -1691,9 +1681,9 @@ class CipherSafeApp(QWidget):
                         QMessageBox.information(self, "產生結果", message)
 
     def cancel_operation(self):
-        if self.worker:
+        if self.process and self.process.is_alive():
             logging.info("使用者點擊了中斷按鈕。")
-            self.worker.stop()
+            self.process.terminate()
             self.cancel_button.setText("正在中斷...")
             self.cancel_button.setEnabled(False)
 
@@ -1728,6 +1718,9 @@ class CipherSafeApp(QWidget):
             self.update_input_path(self.input_path)
 
 if __name__ == '__main__':
+    # 【關鍵】Windows 下使用 multiprocessing 編譯為 exe 必須加這行
+    multiprocessing.freeze_support()
+    
     # --- 日誌和異常處理設定 ---
     log_file_path = setup_logging()
     sys.log_file_path = log_file_path # 將路徑存入sys，方便異常鉤子獲取
@@ -1738,6 +1731,8 @@ if __name__ == '__main__':
     # ---
 
     app = QApplication(sys.argv)
+    
+    # 全局樣式表 (用於 Message Box 等)
     app.setStyleSheet("""
         QDialog, QMessageBox { background-color: #2D2D30; color: #F1F1F1; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
         QDialog QLabel, QMessageBox QLabel { color: #CCCCCC; }
